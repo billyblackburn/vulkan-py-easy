@@ -1,6 +1,49 @@
-# vulkan_py
+# vulkan-py-easy (`vulkan_py` + `vulkan_py.easy`)
 
-**ctypes-based Python bindings for the Vulkan graphics API — generated straight from Khronos's `vk.xml`.**
+**ctypes-based Python bindings for the Vulkan graphics & compute API — with a high-level `vulkan_py.easy` wrapper for concise GPU compute.**
+
+This fork extends [`StormMGamming41/vulkan-py`](https://github.com/StormMGamming41/vulkan-py) by adding [`src/vulkan_py/easy.py`](src/vulkan_py/easy.py) and [`examples/vector_add.py`](examples/vector_add.py).
+
+## What is `vulkan_py.easy`?
+
+Raw Vulkan mirrors the C API 1:1, which means even a simple compute kernel (like vector addition) normally takes ~300–400 lines of `VkInstance`, `VkDevice`, memory-type bitmask lookups, descriptor pools, command buffers, and manual cleanup.
+
+`vulkan_py.easy` wraps that boilerplate into a concise, WebGPU-style Python API while still running directly on top of `vulkan_py`:
+
+- **`get_default_device()` / `SimpleDevice`**: Context manager that creates `VkInstance`, picks the first compute-capable GPU, creates `VkDevice`, `VkQueue`, and `VkCommandPool`, and destroys all tracked Vulkan resources automatically on exit.
+- **`create_buffer()` / `create_buffer_with_data()` / `read_buffer()`**: Allocates host-visible, host-coherent storage buffers (`VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`) and handles `vkMapMemory`/`vkUnmapMemory` with Python buffer-protocol objects (`bytes`, `ctypes` arrays, etc.).
+- **`create_shader_module(glsl_source)`**: Compiles GLSL compute shaders to SPIR-V using `glslc` (requires `glslc` on `PATH`) and creates a `VkShaderModule`.
+- **`create_compute_pipeline()` & `create_bind_group()`**: Generates `VkDescriptorSetLayout`, `VkPipelineLayout` (with optional push constants), `VkPipeline`, and `VkDescriptorSet` from a simple binding count and list of buffers.
+- **`dispatch()`**: Allocates and records a one-time command buffer, binds the pipeline/descriptor set/push constants, dispatches workgroups, submits to the queue, and waits for completion.
+
+### Quick Compute Example (`examples/vector_add.py`)
+
+```python
+import struct
+from ctypes import c_float
+from vulkan_py.easy import get_default_device
+
+with get_default_device() as device:
+    buf_a = device.create_buffer_with_data(a_data)
+    buf_b = device.create_buffer_with_data(b_data)
+    buf_out = device.create_buffer(buf_a.size)
+
+    shader = device.create_shader_module(SHADER)
+    pipeline = device.create_compute_pipeline(shader, num_bindings=3, push_constant_size=4)
+    bind_group = device.create_bind_group(pipeline, [buf_a, buf_b, buf_out])
+
+    device.dispatch(pipeline, bind_group, workgroups=(16, 1, 1), push_constants=struct.pack("<I", 1024))
+    result = device.read_buffer(buf_out)
+```
+
+Run it locally:
+
+```bash
+pip install -e .
+python examples/vector_add.py
+```
+
+---
 
 > **A note to early adopters:** if you picked this up in its first few releases, sorry for the rough/missing docs — this README (and the full tutorial it links to) is the fix, and it should have been here from the start.
 
