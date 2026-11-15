@@ -410,261 +410,25 @@ class App:
         self.swapchain_images = self.gfx.swapchain_images
         self.swapchain_views = self.gfx.swapchain_image_views
 
-    def find_depth_format(self):
-        candidates = [
-            output.VkFormat.VK_FORMAT_D32_SFLOAT,
-            output.VkFormat.VK_FORMAT_D32_SFLOAT_S8_UINT,
-            output.VkFormat.VK_FORMAT_D24_UNORM_S8_UINT,
-        ]
-
-        for fmt in candidates:
-            props = output.VkFormatProperties()
-            self.instance.vkGetPhysicalDeviceFormatProperties(
-                self.physical_device, fmt, byref(props)
-            )
-            if props.optimalTilingFeatures & output.VkFormatFeatureFlagBits.VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT:
-                return fmt
-
-        raise RuntimeError("No supported depth format found")
-
-    def create_image(self, fmt, usage, aspect):
-        info = output.VkImageCreateInfo(
-            imageType=output.VkImageType.VK_IMAGE_TYPE_2D,
-            format=fmt,
-            extent=output.VkExtent3D(
-                width=self.swapchain_extent.width,
-                height=self.swapchain_extent.height,
-                depth=1,
-            ),
-            mipLevels=1,
-            arrayLayers=1,
-            samples=output.VkSampleCountFlagBits.VK_SAMPLE_COUNT_1_BIT,
-            tiling=output.VkImageTiling.VK_IMAGE_TILING_OPTIMAL,
-            usage=usage,
-            sharingMode=output.VkSharingMode.VK_SHARING_MODE_EXCLUSIVE,
-            initialLayout=output.VkImageLayout.VK_IMAGE_LAYOUT_UNDEFINED,
-        )
-
-        image = output.VkImage()
-        check(
-            self.device.vkCreateImage(byref(info), None, byref(image)),
-            "vkCreateImage",
-        )
-
-        requirements = output.VkMemoryRequirements()
-        self.device.vkGetImageMemoryRequirements(
-            image, byref(requirements)
-        )
-
-        memory_type = self.find_memory_type(
-            requirements.memoryTypeBits,
-            output.VkMemoryPropertyFlagBits.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        )
-
-        alloc = output.VkMemoryAllocateInfo(
-            allocationSize=requirements.size,
-            memoryTypeIndex=memory_type,
-        )
-        memory = output.VkDeviceMemory()
-        check(
-            self.device.vkAllocateMemory(byref(alloc), None, byref(memory)),
-            "vkAllocateMemory(image)",
-        )
-        check(
-            self.device.vkBindImageMemory(image, memory, 0),
-            "vkBindImageMemory",
-        )
-
-        subresource = output.VkImageSubresourceRange(
-            aspectMask=aspect,
-            baseMipLevel=0,
-            levelCount=1,
-            baseArrayLayer=0,
-            layerCount=1,
-        )
-        view_info = output.VkImageViewCreateInfo(
-            image=image,
-            viewType=output.VkImageViewType.VK_IMAGE_VIEW_TYPE_2D,
-            format=fmt,
-            subresourceRange=subresource,
-        )
-        view = output.VkImageView()
-        check(
-            self.device.vkCreateImageView(
-                byref(view_info), None, byref(view)
-            ),
-            "vkCreateImageView(depth)",
-        )
-        return image, memory, view
-
     def create_depth_resources(self):
-        self.depth_format = self.find_depth_format()
-
-        aspect = output.VkImageAspectFlagBits.VK_IMAGE_ASPECT_DEPTH_BIT
-        if self.depth_format in (
-            output.VkFormat.VK_FORMAT_D32_SFLOAT_S8_UINT,
-            output.VkFormat.VK_FORMAT_D24_UNORM_S8_UINT,
-        ):
-            aspect |= output.VkImageAspectFlagBits.VK_IMAGE_ASPECT_STENCIL_BIT
-
-        (
-            self.depth_image,
-            self.depth_memory,
-            self.depth_view,
-        ) = self.create_image(
-            self.depth_format,
-            output.VkImageUsageFlagBits.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            aspect,
-        )
+        depth = self.gfx.create_depth_resources()
+        self.depth_image = depth.image
+        self.depth_memory = depth.memory
+        self.depth_view = depth.view
+        self.depth_format = depth.format
 
     def create_render_pass(self):
-        color = output.VkAttachmentDescription(
-            format=self.swapchain_format,
-            samples=output.VkSampleCountFlagBits.VK_SAMPLE_COUNT_1_BIT,
-            loadOp=output.VkAttachmentLoadOp.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            storeOp=output.VkAttachmentStoreOp.VK_ATTACHMENT_STORE_OP_STORE,
-            stencilLoadOp=output.VkAttachmentLoadOp.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            stencilStoreOp=output.VkAttachmentStoreOp.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            initialLayout=output.VkImageLayout.VK_IMAGE_LAYOUT_UNDEFINED,
-            finalLayout=output.VkImageLayout.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        )
-
-        depth = output.VkAttachmentDescription(
-            format=self.depth_format,
-            samples=output.VkSampleCountFlagBits.VK_SAMPLE_COUNT_1_BIT,
-            loadOp=output.VkAttachmentLoadOp.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            storeOp=output.VkAttachmentStoreOp.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            stencilLoadOp=output.VkAttachmentLoadOp.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            stencilStoreOp=output.VkAttachmentStoreOp.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            initialLayout=output.VkImageLayout.VK_IMAGE_LAYOUT_UNDEFINED,
-            finalLayout=output.VkImageLayout.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        )
-
-        attachments = (output.VkAttachmentDescription * 2)(color, depth)
-
-        color_ref = output.VkAttachmentReference(
-            attachment=0,
-            layout=output.VkImageLayout.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        )
-        depth_ref = output.VkAttachmentReference(
-            attachment=1,
-            layout=output.VkImageLayout.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        )
-
-        subpass = output.VkSubpassDescription(
-            pipelineBindPoint=output.VkPipelineBindPoint.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            colorAttachmentCount=1,
-            pColorAttachments=pointer(color_ref),
-            pDepthStencilAttachment=pointer(depth_ref),
-        )
-
-        dependency = output.VkSubpassDependency(
-            srcSubpass=output.VK_SUBPASS_EXTERNAL,
-            dstSubpass=0,
-            srcStageMask=(
-                output.VkPipelineStageFlagBits.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                | output.VkPipelineStageFlagBits.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-            ),
-            dstStageMask=(
-                output.VkPipelineStageFlagBits.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                | output.VkPipelineStageFlagBits.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-            ),
-            srcAccessMask=0,
-            dstAccessMask=(
-                output.VkAccessFlagBits.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                | output.VkAccessFlagBits.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-            ),
-        )
-
-        info = output.VkRenderPassCreateInfo(
-            attachmentCount=2,
-            pAttachments=cast(
-                attachments,
-                POINTER(output.VkAttachmentDescription),
-            ),
-            subpassCount=1,
-            pSubpasses=pointer(subpass),
-            dependencyCount=1,
-            pDependencies=pointer(dependency),
-        )
-
-        self.render_pass = output.VkRenderPass()
-        check(
-            self.device.vkCreateRenderPass(
-                byref(info), None, byref(self.render_pass)
-            ),
-            "vkCreateRenderPass",
-        )
-
-    def _load_shader_module(self, path):
-        return self.gfx.load_shader_module(SHADERS_DIR / Path(path).name).handle
+        self.render_pass = self.gfx.create_render_pass(depth_format=self.depth_format)
 
     def create_descriptor_system(self):
-        binding = output.VkDescriptorSetLayoutBinding(
-            binding=0,
-            descriptorType=output.VkDescriptorType.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            descriptorCount=1,
-            stageFlags=(
-                output.VkShaderStageFlagBits.VK_SHADER_STAGE_VERTEX_BIT
-                | output.VkShaderStageFlagBits.VK_SHADER_STAGE_FRAGMENT_BIT
-            ),
-            pImmutableSamplers=None,
+        desc = self.gfx.create_uniform_descriptor_sets(
+            MAX_FRAMES_IN_FLIGHT, ctypes.sizeof(SceneUBO)
         )
-
-        info = output.VkDescriptorSetLayoutCreateInfo(
-            bindingCount=1,
-            pBindings=pointer(binding),
-        )
-
-        check(
-            self.device.vkCreateDescriptorSetLayout(
-                byref(info), None, byref(self.descriptor_set_layout)
-            ),
-            "vkCreateDescriptorSetLayout",
-        )
-
-        pool_size = output.VkDescriptorPoolSize(
-            type=output.VkDescriptorType.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            descriptorCount=MAX_FRAMES_IN_FLIGHT,
-        )
-
-        pool_info = output.VkDescriptorPoolCreateInfo(
-            maxSets=MAX_FRAMES_IN_FLIGHT,
-            poolSizeCount=1,
-            pPoolSizes=pointer(pool_size),
-        )
-
-        self.descriptor_pool = output.VkDescriptorPool()
-        check(
-            self.device.vkCreateDescriptorPool(
-                byref(pool_info), None, byref(self.descriptor_pool)
-            ),
-            "vkCreateDescriptorPool",
-        )
-
-        layouts = (
-            output.VkDescriptorSetLayout * MAX_FRAMES_IN_FLIGHT
-        )(*([self.descriptor_set_layout] * MAX_FRAMES_IN_FLIGHT))
-
-        alloc = output.VkDescriptorSetAllocateInfo(
-            descriptorPool=self.descriptor_pool,
-            descriptorSetCount=MAX_FRAMES_IN_FLIGHT,
-            pSetLayouts=cast(
-                layouts,
-                POINTER(output.VkDescriptorSetLayout),
-            ),
-        )
-
-        sets = (
-            output.VkDescriptorSet * MAX_FRAMES_IN_FLIGHT
-        )()
-        check(
-            self.device.vkAllocateDescriptorSets(
-                byref(alloc), sets
-            ),
-            "vkAllocateDescriptorSets",
-        )
-        self.descriptor_sets = list(sets)
+        self.descriptor_set_layout = desc.layout
+        self.descriptor_pool = desc.pool
+        self.descriptor_sets = desc.sets
+        self.uniform_buffers = [b.handle for b in desc.buffers]
+        self.uniform_memories = [b.memory for b in desc.buffers]
 
     def find_memory_type(self, type_bits, required):
         return self.gfx.find_memory_type(type_bits, required)
@@ -717,218 +481,30 @@ class App:
         )
 
     def create_uniform_buffers(self):
-        size = ctypes.sizeof(SceneUBO)
-
-        for _ in range(MAX_FRAMES_IN_FLIGHT):
-            buffer, memory = self.create_buffer(
-                size,
-                output.VkBufferUsageFlagBits.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                output.VkMemoryPropertyFlagBits.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                | output.VkMemoryPropertyFlagBits.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            )
-            self.uniform_buffers.append(buffer)
-            self.uniform_memories.append(memory)
-
-            descriptor_info = output.VkDescriptorBufferInfo(
-                buffer=buffer,
-                offset=0,
-                range=size,
-            )
-            write = output.VkWriteDescriptorSet(
-                dstSet=self.descriptor_sets[len(self.uniform_buffers) - 1],
-                dstBinding=0,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=output.VkDescriptorType.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                pBufferInfo=pointer(descriptor_info),
-            )
-            self.device.vkUpdateDescriptorSets(
-                1, pointer(write), 0, None
-            )
+        pass  # created and bound by create_descriptor_system()
 
     def create_pipeline(self):
-        vert = self._load_shader_module(
-            os.path.join("shaders", "lighting.vert.spv")
+        gp = self.gfx.create_graphics_pipeline(
+            SHADERS_DIR / "lighting.vert.spv",
+            SHADERS_DIR / "lighting.frag.spv",
+            self.render_pass,
+            vertex_stride=ctypes.sizeof(Vertex),
+            vertex_attributes=[
+                (0, output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT, 0),
+                (1, output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT, 12),
+                (2, output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT, 24),
+            ],
+            descriptor_layouts=(self.descriptor_set_layout,),
+            push_constant_size=64,
+            depth_test=True,
         )
-        frag = self._load_shader_module(
-            os.path.join("shaders", "lighting.frag.spv")
-        )
-
-        vert_stage = output.VkPipelineShaderStageCreateInfo(
-            stage=output.VkShaderStageFlagBits.VK_SHADER_STAGE_VERTEX_BIT,
-            module=vert,
-            pName=b"main",
-        )
-        frag_stage = output.VkPipelineShaderStageCreateInfo(
-            stage=output.VkShaderStageFlagBits.VK_SHADER_STAGE_FRAGMENT_BIT,
-            module=frag,
-            pName=b"main",
-        )
-        stages = (output.VkPipelineShaderStageCreateInfo * 2)(
-            vert_stage, frag_stage
-        )
-
-        binding_desc = output.VkVertexInputBindingDescription(
-            binding=0,
-            stride=ctypes.sizeof(Vertex),
-            inputRate=output.VkVertexInputRate.VK_VERTEX_INPUT_RATE_VERTEX,
-        )
-        attributes = (output.VkVertexInputAttributeDescription * 3)(
-            output.VkVertexInputAttributeDescription(
-                location=0,
-                binding=0,
-                format=output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT,
-                offset=0,
-            ),
-            output.VkVertexInputAttributeDescription(
-                location=1,
-                binding=0,
-                format=output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT,
-                offset=12,
-            ),
-            output.VkVertexInputAttributeDescription(
-                location=2,
-                binding=0,
-                format=output.VkFormat.VK_FORMAT_R32G32B32_SFLOAT,
-                offset=24,
-            ),
-        )
-
-        vertex_input = output.VkPipelineVertexInputStateCreateInfo(
-            vertexBindingDescriptionCount=1,
-            pVertexBindingDescriptions=pointer(binding_desc),
-            vertexAttributeDescriptionCount=3,
-            pVertexAttributeDescriptions=cast(
-                attributes,
-                POINTER(output.VkVertexInputAttributeDescription),
-            ),
-        )
-
-        assembly = output.VkPipelineInputAssemblyStateCreateInfo(
-            topology=output.VkPrimitiveTopology.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            primitiveRestartEnable=VK_FALSE,
-        )
-
-        viewport = output.VkViewport(
-            x=0.0,
-            y=0.0,
-            width=float(self.swapchain_extent.width),
-            height=float(self.swapchain_extent.height),
-            minDepth=0.0,
-            maxDepth=1.0,
-        )
-        scissor = output.VkRect2D(
-            offset=output.VkOffset2D(x=0, y=0),
-            extent=self.swapchain_extent,
-        )
-        viewport_state = output.VkPipelineViewportStateCreateInfo(
-            viewportCount=1,
-            pViewports=pointer(viewport),
-            scissorCount=1,
-            pScissors=pointer(scissor),
-        )
-
-        rasterizer = output.VkPipelineRasterizationStateCreateInfo(
-            polygonMode=output.VkPolygonMode.VK_POLYGON_MODE_FILL,
-            cullMode=output.VkCullModeFlagBits.VK_CULL_MODE_BACK_BIT,
-            frontFace=output.VkFrontFace.VK_FRONT_FACE_CLOCKWISE,
-            lineWidth=1.0,
-        )
-        multisample = output.VkPipelineMultisampleStateCreateInfo(
-            rasterizationSamples=output.VkSampleCountFlagBits.VK_SAMPLE_COUNT_1_BIT
-        )
-
-        depth_state = output.VkPipelineDepthStencilStateCreateInfo(
-            depthTestEnable=VK_TRUE,
-            depthWriteEnable=VK_TRUE,
-            depthCompareOp=output.VkCompareOp.VK_COMPARE_OP_LESS,
-        )
-
-        blend_attachment = output.VkPipelineColorBlendAttachmentState(
-            blendEnable=VK_FALSE,
-            colorWriteMask=0xF,
-        )
-        blend = output.VkPipelineColorBlendStateCreateInfo(
-            attachmentCount=1,
-            pAttachments=pointer(blend_attachment),
-        )
-
-        push_constant = output.VkPushConstantRange(
-            stageFlags=output.VkShaderStageFlagBits.VK_SHADER_STAGE_VERTEX_BIT,
-            offset=0,
-            size=64,
-        )
-        layout_info = output.VkPipelineLayoutCreateInfo(
-            setLayoutCount=1,
-            pSetLayouts=pointer(self.descriptor_set_layout),
-            pushConstantRangeCount=1,
-            pPushConstantRanges=pointer(push_constant),
-        )
-        self.pipeline_layout = output.VkPipelineLayout()
-        check(
-            self.device.vkCreatePipelineLayout(
-                byref(layout_info), None, byref(self.pipeline_layout)
-            ),
-            "vkCreatePipelineLayout",
-        )
-
-        pipeline_info = output.VkGraphicsPipelineCreateInfo(
-            stageCount=2,
-            pStages=cast(
-                stages,
-                POINTER(output.VkPipelineShaderStageCreateInfo),
-            ),
-            pVertexInputState=pointer(vertex_input),
-            pInputAssemblyState=pointer(assembly),
-            pViewportState=pointer(viewport_state),
-            pRasterizationState=pointer(rasterizer),
-            pMultisampleState=pointer(multisample),
-            pDepthStencilState=pointer(depth_state),
-            pColorBlendState=pointer(blend),
-            layout=self.pipeline_layout,
-            renderPass=self.render_pass,
-            subpass=0,
-        )
-
-        self.pipeline = output.VkPipeline()
-        check(
-            self.device.vkCreateGraphicsPipelines(
-                output.VkPipelineCache(0),
-                1,
-                byref(pipeline_info),
-                None,
-                byref(self.pipeline),
-            ),
-            "vkCreateGraphicsPipelines",
-        )
-
-        self.device.vkDestroyShaderModule(vert, None)
-        self.device.vkDestroyShaderModule(frag, None)
+        self.pipeline = gp.pipeline
+        self.pipeline_layout = gp.layout
 
     def create_framebuffers(self):
-        self.framebuffers = []
-        for color_view in self.swapchain_views:
-            attachments = (output.VkImageView * 2)(
-                color_view, self.depth_view
-            )
-            info = output.VkFramebufferCreateInfo(
-                renderPass=self.render_pass,
-                attachmentCount=2,
-                pAttachments=cast(
-                    attachments, POINTER(output.VkImageView)
-                ),
-                width=self.swapchain_extent.width,
-                height=self.swapchain_extent.height,
-                layers=1,
-            )
-            fb = output.VkFramebuffer()
-            check(
-                self.device.vkCreateFramebuffer(
-                    byref(info), None, byref(fb)
-                ),
-                "vkCreateFramebuffer",
-            )
-            self.framebuffers.append(fb)
+        self.framebuffers = self.gfx.create_framebuffers(
+            self.render_pass, depth_view=self.depth_view
+        )
 
     def create_command_pool(self):
         self.command_pool = self.gfx.create_command_pool()
@@ -1005,36 +581,12 @@ class App:
             "vkBeginCommandBuffer",
         )
 
-        clear_values = (output.VkClearValue * 2)(
-            output.VkClearValue(
-                color=output.VkClearColorValue(
-                    float32=(0.008, 0.012, 0.022, 1.0)
-                )
-            ),
-            output.VkClearValue(
-                depthStencil=output.VkClearDepthStencilValue(
-                    depth=1.0, stencil=0
-                )
-            ),
-        )
-
-        render_info = output.VkRenderPassBeginInfo(
-            renderPass=self.render_pass,
-            framebuffer=self.framebuffers[image_index],
-            renderArea=output.VkRect2D(
-                offset=output.VkOffset2D(x=0, y=0),
-                extent=self.swapchain_extent,
-            ),
-            clearValueCount=2,
-            pClearValues=cast(
-                clear_values, POINTER(output.VkClearValue)
-            ),
-        )
-
-        self.device.vkCmdBeginRenderPass(
+        self.gfx.begin_render_pass(
             cmd,
-            byref(render_info),
-            output.VkSubpassContents.VK_SUBPASS_CONTENTS_INLINE,
+            self.render_pass,
+            self.framebuffers[image_index],
+            clear_color=(0.008, 0.012, 0.022, 1.0),
+            clear_depth=1.0,
         )
 
         self.device.vkCmdBindPipeline(
@@ -1296,26 +848,6 @@ class App:
                 self.gfx.destroy_frame_sync(self.sync)
             if self.command_pool:
                 self.gfx.device.vkDestroyCommandPool(self.command_pool, None)
-            for framebuffer in self.framebuffers:
-                self.gfx.device.vkDestroyFramebuffer(framebuffer, None)
-            if self.pipeline:
-                self.gfx.device.vkDestroyPipeline(self.pipeline, None)
-            if self.pipeline_layout:
-                self.gfx.device.vkDestroyPipelineLayout(self.pipeline_layout, None)
-            if self.descriptor_pool:
-                self.gfx.device.vkDestroyDescriptorPool(self.descriptor_pool, None)
-            if self.descriptor_set_layout:
-                self.gfx.device.vkDestroyDescriptorSetLayout(
-                    self.descriptor_set_layout, None
-                )
-            if self.depth_view:
-                self.gfx.device.vkDestroyImageView(self.depth_view, None)
-            if self.depth_image:
-                self.gfx.device.vkDestroyImage(self.depth_image, None)
-            if self.depth_memory:
-                self.gfx.device.vkFreeMemory(self.depth_memory, None)
-            if self.render_pass:
-                self.gfx.device.vkDestroyRenderPass(self.render_pass, None)
             self.gfx.close()
 
         if self.window:
