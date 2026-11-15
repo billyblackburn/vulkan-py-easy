@@ -1,20 +1,35 @@
 # vulkan-py-easy (`vulkan_py` + `vulkan_py.easy`)
 
-**ctypes-based Python bindings for the Vulkan graphics & compute API — with a high-level `vulkan_py.easy` wrapper for concise GPU compute.**
+**ctypes-based Python bindings for the Vulkan graphics & compute API — with a high-level `vulkan_py.easy` wrapper that removes Vulkan boilerplate.**
 
-This fork extends [`StormMGamming41/vulkan-py`](https://github.com/StormMGamming41/vulkan-py) by adding [`src/vulkan_py/easy.py`](src/vulkan_py/easy.py) and [`examples/vector_add.py`](examples/vector_add.py).
+This fork extends [`StormMGamming41/vulkan-py`](https://github.com/StormMGamming41/vulkan-py) by adding [`src/vulkan_py/easy.py`](src/vulkan_py/easy.py), adding [`examples/vector_add.py`](examples/vector_add.py), and simplifying [`examples/hello_triangle.py`](examples/hello_triangle.py) and [`examples/lighting_demo.py`](examples/lighting_demo.py).
 
-## What is `vulkan_py.easy`?
+## What `vulkan_py.easy` Adds
 
-Raw Vulkan mirrors the C API 1:1, which means even a simple compute kernel (like vector addition) normally takes ~300–400 lines of `VkInstance`, `VkDevice`, memory-type bitmask lookups, descriptor pools, command buffers, and manual cleanup.
+Raw Vulkan mirrors the C API 1:1, which means even small compute or rendering scripts normally require hundreds of lines of `VkInstance`, `VkDevice`, memory-type bitmask lookups, swapchain setup, descriptor pools, command buffers, synchronization objects, and manual `vkDestroy*` cleanup.
 
-`vulkan_py.easy` wraps that boilerplate into a concise, WebGPU-style Python API while still running directly on top of `vulkan_py`:
+`vulkan_py.easy` wraps that boilerplate into two high-level classes while keeping full `vulkan_py` access underneath:
 
-- **`get_default_device()` / `SimpleDevice`**: Context manager that creates `VkInstance`, picks the first compute-capable GPU, creates `VkDevice`, `VkQueue`, and `VkCommandPool`, and destroys all tracked Vulkan resources automatically on exit.
-- **`create_buffer()` / `create_buffer_with_data()` / `read_buffer()`**: Allocates host-visible, host-coherent storage buffers (`VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`) and handles `vkMapMemory`/`vkUnmapMemory` with Python buffer-protocol objects (`bytes`, `ctypes` arrays, etc.).
-- **`create_shader_module(glsl_source)`**: Compiles GLSL compute shaders to SPIR-V using `glslc` (requires `glslc` on `PATH`) and creates a `VkShaderModule`.
-- **`create_compute_pipeline()` & `create_bind_group()`**: Generates `VkDescriptorSetLayout`, `VkPipelineLayout` (with optional push constants), `VkPipeline`, and `VkDescriptorSet` from a simple binding count and list of buffers.
-- **`dispatch()`**: Allocates and records a one-time command buffer, binds the pipeline/descriptor set/push constants, dispatches workgroups, submits to the queue, and waits for completion.
+### 1. Headless Compute (`SimpleDevice` / `get_default_device()`)
+- **Automatic context & cleanup**: `with get_default_device() as device:` creates `VkInstance`, picks a compute-capable GPU, creates `VkDevice`, `VkQueue`, and `VkCommandPool`, and destroys all tracked resources on exit.
+- **Buffer helpers**: `create_buffer()`, `create_buffer_with_data()`, and `read_buffer()` handle host-visible, host-coherent storage buffers and `vkMapMemory`/`vkUnmapMemory` with Python buffer-protocol objects.
+- **Inline GLSL compilation**: `create_shader_module(glsl_source)` compiles GLSL compute shaders to SPIR-V via `glslc` (requires `glslc` on `PATH`).
+- **Auto-wired compute pipelines & dispatch**: `create_compute_pipeline()`, `create_bind_group()`, and `dispatch()` handle descriptor layouts/pools/sets, push constants, command recording, submission, and `vkQueueWaitIdle`.
+
+### 2. Windowed Graphics (`GraphicsDevice`)
+- **Instance, validation, surface, device & swapchain**: `GraphicsDevice(window)` creates `VkInstance` (with automatic fallback if `VK_LAYER_KHRONOS_validation` isn't installed), `VkDebugUtilsMessengerEXT`, `VkSurfaceKHR`, picks a discrete GPU with graphics + present support, creates `VkDevice` + queues, and sets up the swapchain and image views (`create_swapchain()`).
+- **Render pass, depth & framebuffers**: `create_depth_resources()`, `create_render_pass(depth_format=...)`, `create_framebuffers()`, and `begin_render_pass()`.
+- **Pipelines, shaders & uniform descriptors**: `load_shader_module()` (`.spv` files), `create_graphics_pipeline()` (viewport/scissor/rasterizer/MSAA/blend/depth/vertex attributes/push constants with auto-destroyed temporary shader modules), and `create_uniform_descriptor_sets()`.
+- **Command buffers & frame sync**: `create_command_pool()`, `allocate_command_buffers()`, `create_frame_sync()`, `acquire_next_image()`, and `submit_and_present()`.
+- **Automatic teardown**: `close()` destroys all tracked framebuffers, pipelines, descriptor pools/layouts, depth resources, render passes, buffers, swapchain, device, surface, debug messenger, and instance.
+
+### Example Line-Count Reduction
+
+| Example | Before | After | What changed |
+| --- | --- | --- | --- |
+| [`examples/vector_add.py`](examples/vector_add.py) | ~300+ lines (raw `vulkan_py`) | ~57 lines | Uses `get_default_device()`, `create_buffer_with_data()`, `create_shader_module()`, `dispatch()` |
+| [`examples/hello_triangle.py`](examples/hello_triangle.py) | 534 lines | 71 lines | Uses `GraphicsDevice`, `create_render_pass()`, `create_graphics_pipeline()`, `create_framebuffers()`, `FrameSync` |
+| [`examples/lighting_demo.py`](examples/lighting_demo.py) | 1,860 lines | 815 lines | Uses `GraphicsDevice`, `create_depth_resources()`, `create_uniform_descriptor_sets()`, `create_graphics_pipeline()`, `begin_render_pass()` |
 
 ### Quick Compute Example (`examples/vector_add.py`)
 
