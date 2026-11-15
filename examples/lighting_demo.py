@@ -1,10 +1,12 @@
 import ctypes
 import math
 import os
+from pathlib import Path
 import time
 
 import glfw
 import vulkan_py as output
+from vulkan_py.easy import GraphicsDevice, check_vk as check
 
 from ctypes import (
     POINTER,
@@ -28,9 +30,7 @@ VK_FALSE = 0
 UINT64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
-def check(result, what):
-    if result != output.VkResult.VK_SUCCESS:
-        raise RuntimeError(f"{what} failed: {result}")
+SHADERS_DIR = Path(__file__).resolve().parent / "shaders"
 
 
 class Vertex(ctypes.Structure):
@@ -391,380 +391,24 @@ class App:
             glfw.CURSOR_DISABLED,
         )
 
-    def create_instance(self):
-        app_info = output.VkApplicationInfo(
-            pApplicationName=b"Vulkan Python Lighting",
-            applicationVersion=1,
-            pEngineName=b"vulkan_py",
-            engineVersion=1,
-            apiVersion=(1 << 22),
-        )
-
-        required = glfw.get_required_instance_extensions()
-        extensions = [x.encode() if isinstance(x, str) else x for x in required]
-
-        # Debug utils is optional. We only enable it when it is available.
-        # ext_count = c_uint32(0)
-        # output.vkEnumerateInstanceExtensionProperties(
-        #     None, byref(ext_count), None
-        # )
-        # available = (output.VkExtensionProperties * ext_count.value)()
-        # output.vkEnumerateInstanceExtensionProperties(
-        #     None, byref(ext_count), available
-        # )
-        # available_names = {
-        #     bytes(x.extensionName).split(b"\0", 1)[0]
-        #     for x in available
-        # }
-
-        self.validation_enabled = True
-
-        if True:
-            extensions.append(b"VK_EXT_debug_utils")
-            self.debug_enabled = True
-
-        ext_arr = (c_char_p * len(extensions))(*extensions)
-
-        layers = [b"VK_LAYER_KHRONOS_validation"] if self.validation_enabled else []
-        layer_arr = (c_char_p * len(layers))(*layers) if layers else None
-
-        create_info = output.VkInstanceCreateInfo(
-            pApplicationInfo=pointer(app_info),
-            enabledExtensionCount=len(extensions),
-            ppEnabledExtensionNames=cast(ext_arr, POINTER(c_char_p)),
-            enabledLayerCount=len(layers),
-            ppEnabledLayerNames=cast(layer_arr, POINTER(c_char_p)) if layers else None,
-        )
-
-        instance = output.VkInstance()
-        check(
-            output.vkCreateInstance(byref(create_info), None, byref(instance)),
-            "vkCreateInstance",
-        )
-
-        self.raw_instance = instance
-        self.instance = output.Instance(instance)
-
-    # def _available_layers(self):
-    #     count = c_uint32(0)
-    #     output.vkEnumerateInstanceLayerProperties(byref(count), None)
-    #     layers = (output.VkLayerProperties * count.value)()
-    #     output.vkEnumerateInstanceLayerProperties(byref(count), layers)
-    #     return {
-    #         bytes(x.layerName).split(b"\0", 1)[0]
-    #         for x in layers
-    #     }
-
-    def create_debug_messenger(self):
-        if not self.debug_enabled:
-            return
-
-        def callback(severity, message_type, callback_data_ptr, user_data):
-            data = callback_data_ptr.contents
-            message = data.pMessage.decode(errors="replace") if data.pMessage else "<no message>"
-            print(f"[Vulkan validation] {message}")
-            return 0
-
-        self.debug_callback_fn = output.PFN_vkDebugUtilsMessengerCallbackEXT(callback)
-
-        info = output.VkDebugUtilsMessengerCreateInfoEXT(
-            messageSeverity=(
-                output.VkDebugUtilsMessageSeverityFlagBitsEXT.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
-                | output.VkDebugUtilsMessageSeverityFlagBitsEXT.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
-            ),
-            messageType=(
-                output.VkDebugUtilsMessageTypeFlagBitsEXT.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
-                | output.VkDebugUtilsMessageTypeFlagBitsEXT.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
-                | output.VkDebugUtilsMessageTypeFlagBitsEXT.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT
-            ),
-            pfnUserCallback=self.debug_callback_fn,
-        )
-
-        check(
-            self.instance.vkCreateDebugUtilsMessengerEXT(
-                info, None, byref(self.debug_messenger)
-            ),
-            "vkCreateDebugUtilsMessengerEXT",
-        )
-
-    def create_surface(self):
-        self.surface = output.VkSurfaceKHR()
-        surface_handle = c_void_p(0)
-        result = glfw.create_window_surface(
-            self.raw_instance.value,
+    def init_graphics(self):
+        self.gfx = GraphicsDevice(
             self.window,
-            None,
-            byref(surface_handle),
+            app_name="Vulkan Python Lighting",
+            preferred_format=output.VkFormat.VK_FORMAT_B8G8R8A8_SRGB,
         )
-        if result != 0:
-            raise RuntimeError(f"glfwCreateWindowSurface failed: {result}")
-        self.surface = output.VkSurfaceKHR(surface_handle.value)
-
-    def find_queue_families(self, physical_device):
-        count = c_uint32(0)
-        self.instance.vkGetPhysicalDeviceQueueFamilyProperties(
-            physical_device, byref(count), None
-        )
-        families = (output.VkQueueFamilyProperties * count.value)()
-        self.instance.vkGetPhysicalDeviceQueueFamilyProperties(
-            physical_device, byref(count), families
-        )
-
-        graphics = None
-        present = None
-
-        for i, family in enumerate(families):
-            if family.queueFlags & output.VkQueueFlagBits.VK_QUEUE_GRAPHICS_BIT:
-                graphics = i
-
-            supported = c_uint32(0)
-            self.instance.vkGetPhysicalDeviceSurfaceSupportKHR(
-                physical_device, i, self.surface, byref(supported)
-            )
-            if supported.value:
-                present = i
-
-            if graphics is not None and present is not None:
-                break
-
-        return graphics, present
-
-    def supports_device_extension(self, physical_device, wanted):
-        count = c_uint32(0)
-        self.instance.vkEnumerateDeviceExtensionProperties(
-            physical_device, None, byref(count), None
-        )
-        props = (output.VkExtensionProperties * count.value)()
-        self.instance.vkEnumerateDeviceExtensionProperties(
-            physical_device, None, byref(count), props
-        )
-        names = {
-            bytes(x.extensionName).split(b"\0", 1)[0]
-            for x in props
-        }
-        return wanted in names
-
-    def pick_physical_device(self):
-        count = c_uint32(0)
-        check(
-            self.instance.vkEnumeratePhysicalDevices(
-                byref(count), None
-            ),
-            "vkEnumeratePhysicalDevices",
-        )
-
-        devices = (output.VkPhysicalDevice * count.value)()
-        check(
-            self.instance.vkEnumeratePhysicalDevices(
-                byref(count), devices
-            ),
-            "vkEnumeratePhysicalDevices",
-        )
-
-        for device in devices:
-            graphics, present = self.find_queue_families(device)
-            if graphics is None or present is None:
-                continue
-            if not self.supports_device_extension(device, b"VK_KHR_swapchain"):
-                continue
-
-            self.physical_device = device
-            self.graphics_family = graphics
-            self.present_family = present
-            break
-
-        if self.physical_device is None:
-            raise RuntimeError("No suitable Vulkan GPU found")
-
-        props = output.VkPhysicalDeviceProperties()
-        self.instance.vkGetPhysicalDeviceProperties(
-            self.physical_device, byref(props)
-        )
-        print(
-            "Using GPU:",
-            bytes(props.deviceName).split(b"\0", 1)[0].decode(errors="replace"),
-        )
-
-    def create_device(self):
-        unique = sorted({self.graphics_family, self.present_family})
-        priority = c_float(1.0)
-
-        queue_infos = [
-            output.VkDeviceQueueCreateInfo(
-                queueFamilyIndex=f,
-                queueCount=1,
-                pQueuePriorities=pointer(priority),
-            )
-            for f in unique
-        ]
-        queue_infos_arr = (
-            output.VkDeviceQueueCreateInfo * len(queue_infos)
-        )(*queue_infos)
-
-        ext_arr = (c_char_p * 1)(b"VK_KHR_swapchain")
-        features = output.VkPhysicalDeviceFeatures()
-
-        info = output.VkDeviceCreateInfo(
-            queueCreateInfoCount=len(queue_infos),
-            pQueueCreateInfos=cast(
-                queue_infos_arr,
-                POINTER(output.VkDeviceQueueCreateInfo),
-            ),
-            enabledExtensionCount=1,
-            ppEnabledExtensionNames=cast(ext_arr, POINTER(c_char_p)),
-            pEnabledFeatures=pointer(features),
-        )
-
-        raw = output.VkDevice()
-        check(
-            self.instance.vkCreateDevice(
-                self.physical_device, byref(info), None, byref(raw)
-            ),
-            "vkCreateDevice",
-        )
-
-        self.raw_device = raw
-        self.device = output.Device(raw)
-
-        self.graphics_queue = output.VkQueue()
-        self.present_queue = output.VkQueue()
-
-        self.device.vkGetDeviceQueue(
-            self.graphics_family, 0, byref(self.graphics_queue)
-        )
-        self.device.vkGetDeviceQueue(
-            self.present_family, 0, byref(self.present_queue)
-        )
-
-    def create_swapchain(self):
-        caps = output.VkSurfaceCapabilitiesKHR()
-        check(
-            self.instance.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-                self.physical_device, self.surface, byref(caps)
-            ),
-            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
-        )
-
-        count = c_uint32(0)
-        self.instance.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            self.physical_device, self.surface, byref(count), None
-        )
-        formats = (output.VkSurfaceFormatKHR * count.value)()
-        self.instance.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            self.physical_device, self.surface, byref(count), formats
-        )
-
-        chosen = formats[0]
-        for fmt in formats:
-            if (
-                fmt.format == output.VkFormat.VK_FORMAT_B8G8R8A8_UNORM
-                and fmt.colorSpace == output.VkColorSpaceKHR.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-            ):
-                chosen = fmt
-                break
-
-        mode_count = c_uint32(0)
-        self.instance.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            self.physical_device, self.surface, byref(mode_count), None
-        )
-        modes = (ctypes.c_int32 * mode_count.value)()
-        self.instance.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            self.physical_device, self.surface, byref(mode_count), modes
-        )
-
-        present_mode = output.VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR
-        for mode in modes:
-            if mode == output.VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR:
-                present_mode = mode
-                break
-
-        if caps.currentExtent.width != 0xFFFFFFFF:
-            extent = caps.currentExtent
-        else:
-            extent = output.VkExtent2D(
-                width=max(caps.minImageExtent.width, min(WIDTH, caps.maxImageExtent.width)),
-                height=max(caps.minImageExtent.height, min(HEIGHT, caps.maxImageExtent.height)),
-            )
-
-        image_count = caps.minImageCount + 1
-        if caps.maxImageCount and image_count > caps.maxImageCount:
-            image_count = caps.maxImageCount
-
-        family_indices = (c_uint32 * 2)(
-            self.graphics_family, self.present_family
-        )
-
-        if self.graphics_family != self.present_family:
-            sharing_mode = output.VkSharingMode.VK_SHARING_MODE_CONCURRENT
-            family_count = 2
-            family_ptr = cast(family_indices, POINTER(c_uint32))
-        else:
-            sharing_mode = output.VkSharingMode.VK_SHARING_MODE_EXCLUSIVE
-            family_count = 0
-            family_ptr = None
-
-        info = output.VkSwapchainCreateInfoKHR(
-            surface=self.surface,
-            minImageCount=image_count,
-            imageFormat=chosen.format,
-            imageColorSpace=chosen.colorSpace,
-            imageExtent=extent,
-            imageArrayLayers=1,
-            imageUsage=output.VkImageUsageFlagBits.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            imageSharingMode=sharing_mode,
-            queueFamilyIndexCount=family_count,
-            pQueueFamilyIndices=family_ptr,
-            preTransform=caps.currentTransform,
-            compositeAlpha=output.VkCompositeAlphaFlagBitsKHR.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            presentMode=present_mode,
-            clipped=VK_TRUE,
-            oldSwapchain=output.VkSwapchainKHR(0),
-        )
-
-        self.swapchain = output.VkSwapchainKHR()
-        check(
-            self.device.vkCreateSwapchainKHR(
-                byref(info), None, byref(self.swapchain)
-            ),
-            "vkCreateSwapchainKHR",
-        )
-
-        self.swapchain_format = chosen.format
-        self.swapchain_extent = extent
-
-        image_count = c_uint32(0)
-        self.device.vkGetSwapchainImagesKHR(
-            self.swapchain, byref(image_count), None
-        )
-        images = (output.VkImage * image_count.value)()
-        self.device.vkGetSwapchainImagesKHR(
-            self.swapchain, byref(image_count), images
-        )
-        self.swapchain_images = list(images)
-
-    def create_image_views(self):
-        self.swapchain_views = []
-
-        for image in self.swapchain_images:
-            subresource = output.VkImageSubresourceRange(
-                aspectMask=output.VkImageAspectFlagBits.VK_IMAGE_ASPECT_COLOR_BIT,
-                baseMipLevel=0,
-                levelCount=1,
-                baseArrayLayer=0,
-                layerCount=1,
-            )
-            info = output.VkImageViewCreateInfo(
-                image=image,
-                viewType=output.VkImageViewType.VK_IMAGE_VIEW_TYPE_2D,
-                format=self.swapchain_format,
-                subresourceRange=subresource,
-            )
-            view = output.VkImageView()
-            check(
-                self.device.vkCreateImageView(byref(info), None, byref(view)),
-                "vkCreateImageView",
-            )
-            self.swapchain_views.append(view)
+        self.instance = self.gfx.instance
+        self.physical_device = self.gfx.physical_device
+        self.device = self.gfx.device
+        self.graphics_family = self.gfx.graphics_family
+        self.present_family = self.gfx.present_family
+        self.graphics_queue = self.gfx.graphics_queue
+        self.present_queue = self.gfx.present_queue
+        self.swapchain = self.gfx.swapchain
+        self.swapchain_format = self.gfx.swapchain_format
+        self.swapchain_extent = self.gfx.swapchain_extent
+        self.swapchain_images = self.gfx.swapchain_images
+        self.swapchain_views = self.gfx.swapchain_image_views
 
     def find_depth_format(self):
         candidates = [
@@ -953,26 +597,7 @@ class App:
         )
 
     def _load_shader_module(self, path):
-        with open(path, "rb") as f:
-            code = f.read()
-
-        if len(code) == 0 or len(code) % 4:
-            raise RuntimeError(f"Invalid SPIR-V file: {path}")
-
-        buf = (c_uint32 * (len(code) // 4)).from_buffer_copy(code)
-        info = output.VkShaderModuleCreateInfo(
-            codeSize=len(code),
-            pCode=cast(buf, POINTER(c_uint32)),
-        )
-        module = output.VkShaderModule()
-        check(
-            self.device.vkCreateShaderModule(
-                byref(info), None, byref(module)
-            ),
-            f"vkCreateShaderModule({path})",
-        )
-        self.shader_buffers.append(buf)
-        return module
+        return self.gfx.load_shader_module(SHADERS_DIR / Path(path).name).handle
 
     def create_descriptor_system(self):
         binding = output.VkDescriptorSetLayoutBinding(
@@ -1042,69 +667,14 @@ class App:
         self.descriptor_sets = list(sets)
 
     def find_memory_type(self, type_bits, required):
-        props = output.VkPhysicalDeviceMemoryProperties()
-        self.instance.vkGetPhysicalDeviceMemoryProperties(
-            self.physical_device, byref(props)
-        )
-
-        for i in range(props.memoryTypeCount):
-            memory_type = props.memoryTypes[i]
-            if (type_bits & (1 << i)) and (
-                memory_type.propertyFlags & required
-            ) == required:
-                return i
-
-        raise RuntimeError("No compatible Vulkan memory type found")
+        return self.gfx.find_memory_type(type_bits, required)
 
     def create_buffer(self, size, usage, properties):
-        info = output.VkBufferCreateInfo(
-            size=size,
-            usage=usage,
-            sharingMode=output.VkSharingMode.VK_SHARING_MODE_EXCLUSIVE,
-        )
-        buffer = output.VkBuffer()
-        check(
-            self.device.vkCreateBuffer(
-                byref(info), None, byref(buffer)
-            ),
-            "vkCreateBuffer",
-        )
-
-        requirements = output.VkMemoryRequirements()
-        self.device.vkGetBufferMemoryRequirements(
-            buffer, byref(requirements)
-        )
-
-        memory_type = self.find_memory_type(
-            requirements.memoryTypeBits, properties
-        )
-        alloc = output.VkMemoryAllocateInfo(
-            allocationSize=requirements.size,
-            memoryTypeIndex=memory_type,
-        )
-        memory = output.VkDeviceMemory()
-        check(
-            self.device.vkAllocateMemory(
-                byref(alloc), None, byref(memory)
-            ),
-            "vkAllocateMemory(buffer)",
-        )
-        check(
-            self.device.vkBindBufferMemory(buffer, memory, 0),
-            "vkBindBufferMemory",
-        )
-        return buffer, memory
+        buf = self.gfx.create_buffer(size, usage, properties)
+        return buf.handle, buf.memory
 
     def upload_memory(self, memory, data, size):
-        mapped = c_void_p()
-        check(
-            self.device.vkMapMemory(
-                memory, 0, size, 0, byref(mapped)
-            ),
-            "vkMapMemory",
-        )
-        ctypes.memmove(mapped.value, ctypes.addressof(data), size)
-        self.device.vkUnmapMemory(memory)
+        self.gfx.upload_memory(memory, data, size)
 
     def create_geometry(self):
         # Three cubes at different positions plus a large floor.
@@ -1361,74 +931,18 @@ class App:
             self.framebuffers.append(fb)
 
     def create_command_pool(self):
-        info = output.VkCommandPoolCreateInfo(
-            flags=output.VkCommandPoolCreateFlagBits.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            queueFamilyIndex=self.graphics_family,
-        )
-        self.command_pool = output.VkCommandPool()
-        check(
-            self.device.vkCreateCommandPool(
-                byref(info), None, byref(self.command_pool)
-            ),
-            "vkCreateCommandPool",
-        )
+        self.command_pool = self.gfx.create_command_pool()
 
     def create_command_buffers(self):
-        count = len(self.framebuffers)
-        alloc = output.VkCommandBufferAllocateInfo(
-            commandPool=self.command_pool,
-            level=output.VkCommandBufferLevel.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            commandBufferCount=count,
+        self.command_buffers = self.gfx.allocate_command_buffers(
+            self.command_pool, len(self.framebuffers)
         )
-        buffers = (output.VkCommandBuffer * count)()
-        check(
-            self.device.vkAllocateCommandBuffers(
-                byref(alloc), buffers
-            ),
-            "vkAllocateCommandBuffers",
-        )
-        self.command_buffers = list(buffers)
 
     def create_sync(self):
-        sem_info = output.VkSemaphoreCreateInfo()
-        fence_info = output.VkFenceCreateInfo(
-            flags=output.VkFenceCreateFlagBits.VK_FENCE_CREATE_SIGNALED_BIT
-        )
-
-        # One image-available semaphore per frame in flight.
-        for _ in range(MAX_FRAMES_IN_FLIGHT):
-            image_available = output.VkSemaphore()
-            fence = output.VkFence()
-
-            check(
-                self.device.vkCreateSemaphore(
-                    byref(sem_info), None, byref(image_available)
-                ),
-                "vkCreateSemaphore",
-            )
-
-            check(
-                self.device.vkCreateFence(
-                    byref(fence_info), None, byref(fence)
-                ),
-                "vkCreateFence",
-            )
-
-            self.image_available.append(image_available)
-            self.in_flight.append(fence)
-
-        # One render-finished semaphore per swapchain image.
-        for _ in range(len(self.swapchain_images)):
-            render_finished = output.VkSemaphore()
-
-            check(
-                self.device.vkCreateSemaphore(
-                    byref(sem_info), None, byref(render_finished)
-                ),
-                "vkCreateSemaphore",
-            )
-
-            self.render_finished.append(render_finished)
+        self.sync = self.gfx.create_frame_sync(MAX_FRAMES_IN_FLIGHT)
+        self.image_available = self.sync.image_available
+        self.render_finished = self.sync.render_finished
+        self.in_flight = self.sync.in_flight
 
     def update_uniforms(self, frame, target):
         now = time.perf_counter()
@@ -1752,13 +1266,7 @@ class App:
 
     def run(self):
         self.init_window()
-        self.create_instance()
-        self.create_debug_messenger()
-        self.create_surface()
-        self.pick_physical_device()
-        self.create_device()
-        self.create_swapchain()
-        self.create_image_views()
+        self.init_graphics()
         self.create_depth_resources()
         self.create_render_pass()
         self.create_descriptor_system()
@@ -1782,74 +1290,33 @@ class App:
             self.cleanup()
 
     def cleanup(self):
-        if self.device is not None:
-            self.device.vkDeviceWaitIdle()
-
-            for semaphore in self.image_available:
-                self.device.vkDestroySemaphore(semaphore, None)
-            for semaphore in self.render_finished:
-                self.device.vkDestroySemaphore(semaphore, None)
-            for fence in self.in_flight:
-                self.device.vkDestroyFence(fence, None)
-
+        if getattr(self, "gfx", None) is not None and self.gfx.device is not None:
+            self.gfx.device.vkDeviceWaitIdle()
+            if getattr(self, "sync", None) is not None:
+                self.gfx.destroy_frame_sync(self.sync)
             if self.command_pool:
-                self.device.vkDestroyCommandPool(self.command_pool, None)
-
+                self.gfx.device.vkDestroyCommandPool(self.command_pool, None)
             for framebuffer in self.framebuffers:
-                self.device.vkDestroyFramebuffer(framebuffer, None)
-
+                self.gfx.device.vkDestroyFramebuffer(framebuffer, None)
             if self.pipeline:
-                self.device.vkDestroyPipeline(self.pipeline, None)
+                self.gfx.device.vkDestroyPipeline(self.pipeline, None)
             if self.pipeline_layout:
-                self.device.vkDestroyPipelineLayout(self.pipeline_layout, None)
-
+                self.gfx.device.vkDestroyPipelineLayout(self.pipeline_layout, None)
             if self.descriptor_pool:
-                self.device.vkDestroyDescriptorPool(self.descriptor_pool, None)
+                self.gfx.device.vkDestroyDescriptorPool(self.descriptor_pool, None)
             if self.descriptor_set_layout:
-                self.device.vkDestroyDescriptorSetLayout(
+                self.gfx.device.vkDestroyDescriptorSetLayout(
                     self.descriptor_set_layout, None
                 )
-
-            for buffer in self.uniform_buffers:
-                self.device.vkDestroyBuffer(buffer, None)
-            for memory in self.uniform_memories:
-                self.device.vkFreeMemory(memory, None)
-
-            if self.vertex_buffer:
-                self.device.vkDestroyBuffer(self.vertex_buffer, None)
-            if self.vertex_memory:
-                self.device.vkFreeMemory(self.vertex_memory, None)
-            if self.index_buffer:
-                self.device.vkDestroyBuffer(self.index_buffer, None)
-            if self.index_memory:
-                self.device.vkFreeMemory(self.index_memory, None)
-
             if self.depth_view:
-                self.device.vkDestroyImageView(self.depth_view, None)
+                self.gfx.device.vkDestroyImageView(self.depth_view, None)
             if self.depth_image:
-                self.device.vkDestroyImage(self.depth_image, None)
+                self.gfx.device.vkDestroyImage(self.depth_image, None)
             if self.depth_memory:
-                self.device.vkFreeMemory(self.depth_memory, None)
-
-            for view in self.swapchain_views:
-                self.device.vkDestroyImageView(view, None)
-
-            if self.swapchain:
-                self.device.vkDestroySwapchainKHR(self.swapchain, None)
-
+                self.gfx.device.vkFreeMemory(self.depth_memory, None)
             if self.render_pass:
-                self.device.vkDestroyRenderPass(self.render_pass, None)
-
-            self.device.vkDestroyDevice(None)
-
-        if self.instance is not None:
-            if self.debug_messenger:
-                self.instance.vkDestroyDebugUtilsMessengerEXT(
-                    self.debug_messenger, None
-                )
-            if self.surface:
-                self.instance.vkDestroySurfaceKHR(self.surface, None)
-            self.instance.vkDestroyInstance(None)
+                self.gfx.device.vkDestroyRenderPass(self.render_pass, None)
+            self.gfx.close()
 
         if self.window:
             glfw.destroy_window(self.window)
